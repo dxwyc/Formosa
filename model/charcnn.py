@@ -12,7 +12,7 @@ import numpy as np
 class CharCNN(nn.Module):
     def __init__(self, alphabet_size, embedding_dim, hidden_dim, dropout, gpu):
         super(CharCNN, self).__init__()
-        print "build batched char cnn..."
+        print("build batched char cnn...")
         self.gpu = gpu
         self.hidden_dim = hidden_dim
         self.char_drop = nn.Dropout(dropout)
@@ -35,10 +35,10 @@ class CharCNN(nn.Module):
 
     def get_last_hiddens(self, input, seq_lengths):
         """
-            input:  
+            input:
                 input: Variable(batch_size, word_length)
                 seq_lengths: numpy array (batch_size,  1)
-            output: 
+            output:
                 Variable(batch_size, char_hidden_dim)
             Note it only accepts ordered (length) variable, length size is recorded in seq_lengths
         """
@@ -51,10 +51,10 @@ class CharCNN(nn.Module):
 
     def get_all_hiddens(self, input, seq_lengths):
         """
-            input:  
+            input:
                 input: Variable(batch_size,  word_length)
                 seq_lengths: numpy array (batch_size,  1)
-            output: 
+            output:
                 Variable(batch_size, word_length, char_hidden_dim)
             Note it only accepts ordered (length) variable, length size is recorded in seq_lengths
         """
@@ -68,4 +68,4 @@ class CharCNN(nn.Module):
 
     def forward(self, input, seq_lengths):
         return self.get_all_hiddens(input, seq_lengths)
-        
+

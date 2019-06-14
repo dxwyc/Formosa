@@ -8,15 +8,17 @@ import time
 import sys
 import argparse
 import random
+import json
 import copy
 import torch
 import gc
-import cPickle as pickle
+import _pickle as pickle
 import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
+
 from utils.metric import get_ner_fmeasure
 from model.bilstmcrf import BiLSTM_CRF as SeqModel
 from utils.data import Data
@@ -25,7 +27,6 @@ seed_num = 100
 random.seed(seed_num)
 torch.manual_seed(seed_num)
 np.random.seed(seed_num)
-
 
 def data_initialization(data, gaz_file, train_file, dev_file, test_file):
     data.build_alphabet(train_file)
@@ -37,7 +38,6 @@ def data_initialization(data, gaz_file, train_file, dev_file, test_file):
     data.build_gaz_alphabet(test_file)
     data.fix_alphabet()
     return data
-
 
 def predict_check(pred_variable, gold_variable, mask_variable):
     """
@@ -63,7 +63,7 @@ def recover_label(pred_variable, gold_variable, mask_variable, label_alphabet, w
             gold_variable (batch_size, sent_len): gold result variable
             mask_variable (batch_size, sent_len): mask variable
     """
-    
+
     pred_variable = pred_variable[word_recover]
     gold_variable = gold_variable[word_recover]
     mask_variable = mask_variable[word_recover]
@@ -99,26 +99,34 @@ def save_data_setting(data, save_file):
     new_data.test_Ids = []
     new_data.raw_Ids = []
     ## save data settings
-    with open(save_file, 'w') as fp:
+    with open(save_file, 'wb') as fp:
         pickle.dump(new_data, fp)
-    print "Data setting saved to file: ", save_file
+    print("Data setting saved to file: ", save_file)
 
 
 def load_data_setting(save_file):
-    with open(save_file, 'r') as fp:
+    with open(save_file, 'rb') as fp:
         data = pickle.load(fp)
-    print "Data setting loaded from file: ", save_file
+    print("Data setting loaded from file: ", save_file)
     data.show_data_summary()
     return data
 
 def lr_decay(optimizer, epoch, decay_rate, init_lr):
     lr = init_lr * ((1-decay_rate)**epoch)
-    print " Learning rate is setted as:", lr
+    print(" Learning rate is setted as:", lr)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     return optimizer
 
-
+def inference(data, model):
+    instances = data.raw_Ids
+    instance = instances[:1]
+    model.eval()
+    gaz_list,batch_word, batch_biword, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_label, mask  = batchify_with_label(instance, data.HP_gpu, True)
+    tag_seq = model(gaz_list,batch_word, batch_biword, batch_wordlen, batch_char, batch_charlen, batch_charrecover, mask)
+    # print "tag:",tag_seq
+    pred_label, gold_label = recover_label(tag_seq, batch_label, mask, data.label_alphabet, batch_wordrecover)
+    return pred_label
 
 def evaluate(data, model, name):
     if name == "train":
@@ -130,7 +138,7 @@ def evaluate(data, model, name):
     elif name == 'raw':
         instances = data.raw_Ids
     else:
-        print "Error: wrong evaluate name,", name
+        print("Error: wrong evaluate name,", name)
     right_token = 0
     whole_token = 0
     pred_results = []
@@ -141,9 +149,11 @@ def evaluate(data, model, name):
     start_time = time.time()
     train_num = len(instances)
     total_batch = train_num//batch_size+1
+    print(train_num, 'train_num')
+    print(total_batch, 'train_batch')
     for batch_id in range(total_batch):
         start = batch_id*batch_size
-        end = (batch_id+1)*batch_size 
+        end = (batch_id+1)*batch_size
         if end >train_num:
             end =  train_num
         instance = instances[start:end]
@@ -157,14 +167,18 @@ def evaluate(data, model, name):
         gold_results += gold_label
     decode_time = time.time() - start_time
     speed = len(instances)/decode_time
+    print('gold_result', gold_results)
+    print('pred_result', pred_results)
+    print(data.tagScheme)
+    print('='*23)
     acc, p, r, f = get_ner_fmeasure(gold_results, pred_results, data.tagScheme)
-    return speed, acc, p, r, f, pred_results  
+    return speed, acc, p, r, f, pred_results
 
 
 def batchify_with_label(input_batch_list, gpu, volatile_flag=False):
     """
         input: list of words, chars and labels, various length. [[words,biwords,chars,gaz, labels],[words,biwords,chars,labels],...]
-            words: word ids for one sentence. (batch_size, sent_len) 
+            words: word ids for one sentence. (batch_size, sent_len)
             chars: char ids for on sentences, various length. (batch_size, sent_len, each_word_length)
         output:
             zero padding for word and char, with their batch length
@@ -172,9 +186,9 @@ def batchify_with_label(input_batch_list, gpu, volatile_flag=False):
             word_seq_lengths: (batch_size,1) Tensor
             char_seq_tensor: (batch_size*max_sent_len, max_word_len) Variable
             char_seq_lengths: (batch_size*max_sent_len,1) Tensor
-            char_seq_recover: (batch_size*max_sent_len,1)  recover char sequence order 
+            char_seq_recover: (batch_size*max_sent_len,1)  recover char sequence order
             label_seq_tensor: (batch_size, max_sent_len)
-            mask: (batch_size, max_sent_len) 
+            mask: (batch_size, max_sent_len)
     """
     batch_size = len(input_batch_list)
     words = [sent[0] for sent in input_batch_list]
@@ -182,17 +196,21 @@ def batchify_with_label(input_batch_list, gpu, volatile_flag=False):
     chars = [sent[2] for sent in input_batch_list]
     gazs = [sent[3] for sent in input_batch_list]
     labels = [sent[4] for sent in input_batch_list]
-    word_seq_lengths = torch.LongTensor(map(len, words))
-    max_seq_len = word_seq_lengths.max()
+    print(words)
+    word_seq_lengths = torch.LongTensor(list(map(len, words)))
+    print(word_seq_lengths)
+    max_seq_len = word_seq_lengths.max().item()
     word_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len)), volatile =  volatile_flag).long()
     biword_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len)), volatile =  volatile_flag).long()
     label_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len)),volatile =  volatile_flag).long()
-    mask = autograd.Variable(torch.zeros((batch_size, max_seq_len)),volatile =  volatile_flag).byte()
+    mask = autograd.Variable(torch.zeros((batch_size, max_seq_len)), volatile = volatile_flag).byte()
+
     for idx, (seq, biseq, label, seqlen) in enumerate(zip(words, biwords, labels, word_seq_lengths)):
         word_seq_tensor[idx, :seqlen] = torch.LongTensor(seq)
         biword_seq_tensor[idx, :seqlen] = torch.LongTensor(biseq)
         label_seq_tensor[idx, :seqlen] = torch.LongTensor(label)
-        mask[idx, :seqlen] = torch.Tensor([1]*seqlen)
+        mask[idx, :seqlen] = torch.LongTensor([1]*int(seqlen.squeeze().item()))
+
     word_seq_lengths, word_perm_idx = word_seq_lengths.sort(0, descending=True)
     word_seq_tensor = word_seq_tensor[word_perm_idx]
     biword_seq_tensor = biword_seq_tensor[word_perm_idx]
@@ -202,8 +220,8 @@ def batchify_with_label(input_batch_list, gpu, volatile_flag=False):
     ### deal with char
     # pad_chars (batch_size, max_seq_len)
     pad_chars = [chars[idx] + [[0]] * (max_seq_len-len(chars[idx])) for idx in range(len(chars))]
-    length_list = [map(len, pad_char) for pad_char in pad_chars]
-    max_word_len = max(map(max, length_list))
+    length_list = [list(map(len, pad_char)) for pad_char in pad_chars]
+    max_word_len = max(list(map(max, length_list)))
     char_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len, max_word_len)), volatile =  volatile_flag).long()
     char_seq_lengths = torch.LongTensor(length_list)
     for idx, (seq, seqlen) in enumerate(zip(pad_chars, char_seq_lengths)):
@@ -216,9 +234,9 @@ def batchify_with_label(input_batch_list, gpu, volatile_flag=False):
     char_seq_tensor = char_seq_tensor[char_perm_idx]
     _, char_seq_recover = char_perm_idx.sort(0, descending=False)
     _, word_seq_recover = word_perm_idx.sort(0, descending=False)
-    
+
     ## keep the gaz_list in orignial order
-    
+
     gaz_list = [ gazs[i] for i in word_perm_idx]
     gaz_list.append(volatile_flag)
     if gpu:
@@ -234,17 +252,17 @@ def batchify_with_label(input_batch_list, gpu, volatile_flag=False):
 
 
 def train(data, save_model_dir, seg=True):
-    print "Training model..."
+    print("Training model...")
     data.show_data_summary()
     save_data_name = save_model_dir +".dset"
     save_data_setting(data, save_data_name)
     model = SeqModel(data)
-    print "finished built model."
+    print("finished built model.")
     loss_function = nn.NLLLoss()
     parameters = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = optim.SGD(parameters, lr=data.HP_lr, momentum=data.HP_momentum)
     best_dev = -1
-    data.HP_iteration = 100
+    data.HP_iteration = 30
     ## start training
     for idx in range(data.HP_iteration):
         epoch_start = time.time()
@@ -268,7 +286,7 @@ def train(data, save_model_dir, seg=True):
         total_batch = train_num//batch_size+1
         for batch_id in range(total_batch):
             start = batch_id*batch_size
-            end = (batch_id+1)*batch_size 
+            end = (batch_id+1)*batch_size
             if end >train_num:
                 end = train_num
             instance = data.train_Ids[start:end]
@@ -282,8 +300,8 @@ def train(data, save_model_dir, seg=True):
             right, whole = predict_check(tag_seq, batch_label, mask)
             right_token += right
             whole_token += whole
-            sample_loss += loss.data[0]
-            total_loss += loss.data[0]
+            sample_loss += loss.item()#data[0]
+            total_loss += loss.item()#data[0]
             batch_loss += loss
 
             if end%500 == 0:
@@ -300,7 +318,7 @@ def train(data, save_model_dir, seg=True):
                 batch_loss = 0
         temp_time = time.time()
         temp_cost = temp_time - temp_start
-        print("     Instance: %s; Time: %.2fs; loss: %.4f; acc: %s/%s=%.4f"%(end, temp_cost, sample_loss, right_token, whole_token,(right_token+0.)/whole_token))       
+        print("     Instance: %s; Time: %.2fs; loss: %.4f; acc: %s/%s=%.4f"%(end, temp_cost, sample_loss, right_token, whole_token,(right_token+0.)/whole_token))
         epoch_finish = time.time()
         epoch_cost = epoch_finish - epoch_start
         print("Epoch: %s training finished. Time: %.2fs, speed: %.2fst/s,  total loss: %s"%(idx, epoch_cost, train_num/epoch_cost, total_loss))
@@ -319,12 +337,12 @@ def train(data, save_model_dir, seg=True):
 
         if current_score > best_dev:
             if seg:
-                print "Exceed previous best f score:", best_dev
+                print("Exceed previous best f score:", best_dev)
             else:
-                print "Exceed previous best acc score:", best_dev
+                print("Exceed previous best acc score:", best_dev)
             model_name = save_model_dir +'.'+ str(idx) + ".model"
             torch.save(model.state_dict(), model_name)
-            best_dev = current_score 
+            best_dev = current_score
         # ## decode test
         speed, acc, p, r, f, _ = evaluate(data, model, "test")
         test_finish = time.time()
@@ -333,12 +351,41 @@ def train(data, save_model_dir, seg=True):
             print("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f, p: %.4f, r: %.4f, f: %.4f"%(test_cost, speed, acc, p, r, f))
         else:
             print("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f"%(test_cost, speed, acc))
-        gc.collect() 
+        gc.collect()
+
+def load_model_inference(model_dir, data, name, gpu, seg=True):
+    data.HP_gpu = gpu
+    model = SeqModel(data)
+    model.load_state_dict(torch.load(model_dir))
+    return inference(data, model)
+
+def get_entity_from_labels_BIO_schema(text):
+    res = []
+    beg = -1
+    cur = 0
+    tpe = ''
+
+    for i in range(len(text)):
+        if cur == 0 and text[i] == 'O':
+            continue
+        if text[i][0] == 'I':
+            continue
+        elif text[i][0] == 'B':
+            beg = i
+            cur = 1
+            tpe = text[i][2:]
+        else:
+            cur = 0
+            res.append((beg, i-1, tpe))
+            tpe = ''
+
+    res = json.dumps(res)
+    return res
 
 
 def load_model_decode(model_dir, data, name, gpu, seg=True):
     data.HP_gpu = gpu
-    print "Load Model from file: ", model_dir
+    print("Load Model from file: ", model_dir)
     model = SeqModel(data)
     ## load model need consider if the model trained in GPU and load in CPU, or vice versa
     # if not gpu:
@@ -347,7 +394,7 @@ def load_model_decode(model_dir, data, name, gpu, seg=True):
     # else:
     model.load_state_dict(torch.load(model_dir))
         # model = torch.load(model_dir)
-    
+
     print("Decode %s data ..."%(name))
     start_time = time.time()
     speed, acc, p, r, f, pred_results = evaluate(data, model, name)
@@ -359,25 +406,32 @@ def load_model_decode(model_dir, data, name, gpu, seg=True):
         print("%s: time:%.2fs, speed:%.2fst/s; acc: %.4f"%(name, time_cost, speed, acc))
     return pred_results
 
-
-
+def data_transform(text):
+    return [y + ' O' for y in list(text)]
 
 if __name__ == '__main__':
+    text =data_transform('我爱北京天安门，天安门上太阳升起来了，伟大的中华人民共和国，我热爱你')
+    print(type(text))
+    text = ['O']*20
+    text[2] = text[2][:-1]+'B-LOC'
+    text[3] = text[3][:-1]+ 'I-LOC'
+    print(get_entity_from_labels_BIO_schema(text))
+    pass
     parser = argparse.ArgumentParser(description='Tuning with bi-directional LSTM-CRF')
     parser.add_argument('--embedding',  help='Embedding for words', default='None')
-    parser.add_argument('--status', choices=['train', 'test', 'decode'], help='update algorithm', default='train')
+    parser.add_argument('--status', choices=['train', 'test', 'decode', 'inference'], help='update algorithm', default='train')
     parser.add_argument('--savemodel', default="data/model/saved_model.lstmcrf.")
     parser.add_argument('--savedset', help='Dir of saved data setting', default="data/save.dset")
-    parser.add_argument('--train', default="data/conll03/train.bmes") 
-    parser.add_argument('--dev', default="data/conll03/dev.bmes" )  
-    parser.add_argument('--test', default="data/conll03/test.bmes") 
-    parser.add_argument('--seg', default="True") 
-    parser.add_argument('--extendalphabet', default="True") 
-    parser.add_argument('--raw') 
+    parser.add_argument('--train', default="data/conll03/train.bmes")
+    parser.add_argument('--dev', default="data/conll03/dev.bmes" )
+    parser.add_argument('--test', default="data/conll03/test.bmes")
+    parser.add_argument('--seg', default="True")
+    parser.add_argument('--extendalphabet', default="True")
+    parser.add_argument('--raw')
     parser.add_argument('--loadmodel')
-    parser.add_argument('--output') 
+    parser.add_argument('--output')
     args = parser.parse_args()
-   
+
     train_file = args.train
     dev_file = args.dev
     test_file = args.test
@@ -386,7 +440,7 @@ if __name__ == '__main__':
     dset_dir = args.savedset
     output_file = args.output
     if args.seg.lower() == "true":
-        seg = True 
+        seg = True
     else:
         seg = False
     status = args.status.lower()
@@ -401,27 +455,27 @@ if __name__ == '__main__':
     # char_emb = None
     #bichar_emb = None
 
-    print "CuDNN:", torch.backends.cudnn.enabled
+    print("CuDNN:", torch.backends.cudnn.enabled)
     # gpu = False
-    print "GPU available:", gpu
-    print "Status:", status
-    print "Seg: ", seg
-    print "Train file:", train_file
-    print "Dev file:", dev_file
-    print "Test file:", test_file
-    print "Raw file:", raw_file
-    print "Char emb:", char_emb
-    print "Bichar emb:", bichar_emb
-    print "Gaz file:",gaz_file
+    print("GPU available:", gpu)
+    print("Status:", status)
+    print("Seg: ", seg)
+    print("Train file:", train_file)
+    print("Dev file:", dev_file)
+    print("Test file:", test_file)
+    print("Raw file:", raw_file)
+    print("Char emb:", char_emb)
+    print("Bichar emb:", bichar_emb)
+    print("Gaz file:",gaz_file)
     if status == 'train':
-        print "Model saved to:", save_model_dir
+        print("Model saved to:", save_model_dir)
     sys.stdout.flush()
-    
+
     if status == 'train':
         data = Data()
         data.HP_gpu = gpu
         data.HP_use_char = False
-        data.HP_batch_size = 1
+        data.HP_batch_size = 16
         data.use_bigram = False
         data.gaz_dropout = 0.5
         data.norm_gaz_emb = False
@@ -434,19 +488,29 @@ if __name__ == '__main__':
         data.build_biword_pretrain_emb(bichar_emb)
         data.build_gaz_pretrain_emb(gaz_file)
         train(data, save_model_dir, seg)
-    elif status == 'test':      
+    elif status == 'test':
         data = load_data_setting(dset_dir)
         data.generate_instance_with_gaz(dev_file,'dev')
         load_model_decode(model_dir, data , 'dev', gpu, seg)
         data.generate_instance_with_gaz(test_file,'test')
         load_model_decode(model_dir, data, 'test', gpu, seg)
-    elif status == 'decode':       
+    elif status == 'decode':
         data = load_data_setting(dset_dir)
         data.generate_instance_with_gaz(raw_file,'raw')
         decode_results = load_model_decode(model_dir, data, 'raw', gpu, seg)
         data.write_decoded_results(output_file, decode_results, 'raw')
+    elif status == 'inference':
+        data = load_data_setting(dset_dir)
+        in_lines = data_transform('北京人民需要共产党的领导')
+        in_lines.append([' '])
+        print(in_lines)
+        data.inference_single_with_gaz(in_lines)
+        print('e',data.raw_Ids)
+        decode_results = load_model_inference(model_dir, data, 'raw', gpu, seg)
+        print(decode_results)
+        #data.write_decoded_results(output_file, decode_results, 'raw')
     else:
-        print "Invalid argument! Please use valid arguments! (train/test/decode)"
+        print("Invalid argument! Please use valid arguments! (train/test/decode)")
 
 
 
